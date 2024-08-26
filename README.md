@@ -3,6 +3,8 @@
 [![Hugging Face Model](https://img.shields.io/badge/🤗%20Hugging%20Face%20-Model-green)](https://huggingface.co/Stable-X/yoso-delight-v0-4-base)
 [![License](https://img.shields.io/badge/License-Apache--2.0-929292)](https://www.apache.org/licenses/LICENSE-2.0)
 
+![17541724684116_ pic_hd](https://github.com/user-attachments/assets/26713cf5-4f2c-40a3-b6e7-61309b2e175a)
+
 StableDelight is a cutting-edge solution for real-time reflection removal from textured surfaces. Building upon the success of [StableNormal](https://github.com/Stable-X/StableNormal), which focused on enhancing stability in monocular normal estimation, StableDelight takes this concept further by applying it to the challenging task of reflection removal.
 
 ## Background
