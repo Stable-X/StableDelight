@@ -149,8 +149,6 @@ class Predictor:
         
         # Normalize the score to [0, 255] range and convert to uint8
         score = (score - score.min()) / (score.max() - score.min())
-        score = score.clip(0.3, 1)
-        score[score==0.3] = 0
         score = score * 255
         score = score[0].cpu().numpy().astype(np.uint8)
         
