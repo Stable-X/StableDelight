@@ -7,7 +7,7 @@ from torchvision import transforms
 from PIL import Image, ImageOps
 import torch.nn.functional as F
 
-dependencies = ["torch", "numpy", "stabedelight", "diffusers", "PIL"]
+dependencies = ["torch", "numpy",  "diffusers", "PIL"]
 from stabledelight.pipeline_yoso_delight import YosoDelightPipeline
 
 def pad_to_square(image: Image.Image) -> Tuple[Image.Image, Tuple[int, int], Tuple[int, int, int, int]]:
