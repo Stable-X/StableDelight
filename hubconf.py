@@ -145,7 +145,7 @@ class Predictor:
         patch_values = F.avg_pool2d(smoothed_residuals.unsqueeze(0), kernel_size=patch_size, stride=1, padding=patch_size//2).squeeze(0)
         
         # Use patch values as the reflection score
-        score = patch_values
+        score = smoothed_residuals
         
         # Normalize the score to [0, 255] range and convert to uint8
         score = (score - score.min()) / (score.max() - score.min())
