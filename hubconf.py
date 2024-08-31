@@ -96,15 +96,12 @@ class Predictor:
                 row_start, row_end, col_start, col_end = self._tile2latent_indices(row, col, self.tile_size, self.tile_size, tile_overlap, tile_overlap)
                 latent_tile = latents[:, :, row_start:row_end, col_start:col_end]
                 latent_tiles.append(latent_tile)
-        
-        return latent_tiles
 
     def assemble_results(self, tiles: List[torch.Tensor], positions: torch.Tensor, output_shape: Tuple[int, int, int, int], 
                          splits_vertical: int, splits_horizontal: int, tile_overlap: int):
         _, c, h, w = output_shape
         output = torch.zeros(output_shape, device=self.device)
-        weights_sum = torch.zeros((1, 1, h, w), device=self.device)
-        
+        weights_sum = torch.zeros((1, 1, h, w), device=self.device)        
         tile_weights = self._create_tile_weights(self.tile_size, self.tile_size, splits_vertical, splits_horizontal, tile_overlap)
         
         for tile, pos, weight in zip(tiles, positions, tile_weights):
