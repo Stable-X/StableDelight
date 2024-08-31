@@ -1,11 +1,12 @@
 import os
 import glob
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import torch
 import numpy as np
 from torchvision import transforms
 from PIL import Image, ImageOps
 import torch.nn.functional as F
+from tqdm import tqdm
 
 dependencies = ["torch", "numpy",  "diffusers", "PIL"]
 from stabledelight.pipeline_yoso_delight import YosoDelightPipeline
@@ -51,10 +52,11 @@ def center_crop(image: Image.Image) -> Tuple[Image.Image, Tuple[int, int], Tuple
     return cropped_image, image.size, (left, top, right, bottom)
 
 class Predictor:
-    """Predictor class for Stable Diffusion models."""
-
     def __init__(self, model):
         self.model = model
+        self.tile_size = 768  # Fixed tile size
+        self.latent_tile_size = 96  # 768 // 8
+        self.device = model.device
         try:
             import xformers
             self.model.enable_xformers_memory_efficient_attention()
@@ -63,124 +65,139 @@ class Predictor:
 
     def to(self, device, dtype=torch.float16):
         self.model.to(device, dtype)
+        self.device = device
         return self
-    
+
+    def resize_for_tiling(self, img: Image.Image, splits_vertical: int, splits_horizontal: int, tile_overlap: int) -> Image.Image:
+        target_height = self.tile_size + (splits_vertical - 1) * (self.tile_size - tile_overlap)
+        target_width = self.tile_size + (splits_horizontal - 1) * (self.tile_size - tile_overlap)
+        return img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+    def split_image(self, img: torch.Tensor, splits_vertical: int, splits_horizontal: int, tile_overlap: int):
+        _, c, h, w = img.shape
+        tiles = []
+        positions = []
+        
+        for row in range(splits_vertical):
+            for col in range(splits_horizontal):
+                row_start, row_end, col_start, col_end = self._tile2pixel_indices(row, col, self.tile_size, self.tile_size, tile_overlap, tile_overlap)
+                tile = img[:, :, row_start:row_end, col_start:col_end]
+                tiles.append(tile)
+                positions.append([row_start, col_start, row_end - row_start, col_end - col_start])
+        
+        return tiles, torch.tensor(positions, device=self.device)
+
+    def split_latents(self, latents: torch.Tensor, splits_vertical: int, splits_horizontal: int, tile_overlap: int):
+        _, c, h, w = latents.shape
+        latent_tiles = []
+        
+        for row in range(splits_vertical):
+            for col in range(splits_horizontal):
+                row_start, row_end, col_start, col_end = self._tile2latent_indices(row, col, self.tile_size, self.tile_size, tile_overlap, tile_overlap)
+                latent_tile = latents[:, :, row_start:row_end, col_start:col_end]
+                latent_tiles.append(latent_tile)
+        
+        return latent_tiles
+
+    def assemble_results(self, tiles: List[torch.Tensor], positions: torch.Tensor, output_shape: Tuple[int, int, int, int], 
+                         splits_vertical: int, splits_horizontal: int, tile_overlap: int):
+        _, c, h, w = output_shape
+        output = torch.zeros(output_shape, device=self.device)
+        weights_sum = torch.zeros((1, 1, h, w), device=self.device)
+        
+        tile_weights = self._create_tile_weights(self.tile_size, self.tile_size, splits_vertical, splits_horizontal, tile_overlap)
+        
+        for tile, pos, weight in zip(tiles, positions, tile_weights):
+            row_start, col_start, tile_h, tile_w = pos
+            output[:, :, row_start:row_start+tile_h, col_start:col_start+tile_w] += tile * weight
+            weights_sum[:, :, row_start:row_start+tile_h, col_start:col_start+tile_w] += weight
+        
+        # Normalize by the sum of weights
+        output = output / weights_sum.clamp(min=1e-8)
+        return output.clamp(0, 1)
+
+    def _create_tile_weights(self, tile_height: int, tile_width: int, splits_vertical: int, splits_horizontal: int, tile_overlap: int):
+        weights = []
+        for row in range(splits_vertical):
+            for col in range(splits_horizontal):
+                weight = self._gaussian_weights(tile_height, tile_width)
+                
+                # Adjust weights for edge tiles
+                if row == 0:
+                    weight[:tile_overlap//2, :] = 1
+                if row == splits_vertical - 1:
+                    weight[-tile_overlap//2:, :] = 1
+                if col == 0:
+                    weight[:, :tile_overlap//2] = 1
+                if col == splits_horizontal - 1:
+                    weight[:, -tile_overlap//2:] = 1
+                
+                weights.append(weight)
+        return weights
+
+    def _gaussian_weights(self, tile_height: int, tile_width: int):
+        center_y, center_x = tile_height // 2, tile_width // 2
+        y = torch.arange(tile_height, device=self.device)
+        x = torch.arange(tile_width, device=self.device)
+        y, x = torch.meshgrid(y, x, indexing='ij')
+        
+        gaussian = torch.exp(-((x - center_x)**2 + (y - center_y)**2) / (2 * (min(tile_width, tile_height) / 4)**2))
+        return gaussian.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+
+    def _tile2pixel_indices(self, tile_row: int, tile_col: int, tile_width: int, tile_height: int, tile_row_overlap: int, tile_col_overlap: int):
+        row_start = 0 if tile_row == 0 else tile_row * (tile_height - tile_row_overlap)
+        row_end = row_start + tile_height
+        col_start = 0 if tile_col == 0 else tile_col * (tile_width - tile_col_overlap)
+        col_end = col_start + tile_width
+        return row_start, row_end, col_start, col_end
+
+    def _tile2latent_indices(self, tile_row: int, tile_col: int, tile_width: int, tile_height: int, tile_row_overlap: int, tile_col_overlap: int):
+        px_row_start, px_row_end, px_col_start, px_col_end = self._tile2pixel_indices(tile_row, tile_col, tile_width, tile_height, tile_row_overlap, tile_col_overlap)
+        return px_row_start // 8, px_row_end // 8, px_col_start // 8, px_col_end // 8
+
     @torch.no_grad()
-    def __call__(self, img: Image.Image, image_resolution=768, mode='stable', 
-                 preprocess=None) -> Image.Image:
-        if img.mode == 'RGBA':
-            img = img.convert('RGB')
-
-        original_size = img.size
-
-        if preprocess == 'pad':
-            img, original_size, padding_info = pad_to_square(img)
-        elif preprocess == 'crop':
-            img, original_size, crop_info = center_crop(img)
+    def __call__(self, img: Image.Image, splits_vertical: int = 1, splits_horizontal: int = 1, 
+                 tile_overlap: int = 384, mode: str = 'stable') -> Image.Image:
+        img, original_size, padding_info = pad_to_square(img)
+        padded_size = img.size
         
-        img, original_dims, scaling_factors = resize_image(img, image_resolution)
+        # Resize image for tiling
+        img_resized = self.resize_for_tiling(img, splits_vertical, splits_horizontal, tile_overlap)
+        img_tensor = transforms.ToTensor()(img_resized).unsqueeze(0).to(self.device)
+        
+        # Initialize latents for the entire image
         if mode == 'stable':
-            init_latents = torch.zeros([1, 4, img.size[1] // 8, img.size[0] // 8], 
-                                    device="cuda", dtype=torch.float16)
+            init_latents = torch.zeros([1, 4, img_tensor.shape[2] // 8, img_tensor.shape[3] // 8],
+                                       device=self.device, dtype=torch.float16)
         else:
-            init_latents = None
+            init_latents = torch.randn([1, 4, img_tensor.shape[2] // 8, img_tensor.shape[3] // 8],
+                                       device=self.device, dtype=torch.float16)
 
-        pipe_out = self.model(img, latents=init_latents)
-        pred_diffuse = (pipe_out.prediction.clip(-1, 1) + 1) / 2
-        pred_diffuse = (pred_diffuse[0] * 255).astype(np.uint8)
-        pred_diffuse = Image.fromarray(pred_diffuse)
+        # Split image and latents into tiles
+        tiles, positions = self.split_image(img_tensor, splits_vertical, splits_horizontal, tile_overlap)
+        latent_tiles = self.split_latents(init_latents, splits_vertical, splits_horizontal, tile_overlap)
+
+        results = []
+        for tile, latent_tile in tqdm(zip(tiles, latent_tiles), total=len(tiles), desc="Processing tiles"):
+            pipe_out = self.model(tile, latents=latent_tile)
+            pred_diffuse = (pipe_out.prediction.clip(-1, 1) + 1) / 2
+            pred_diffuse = torch.tensor(pred_diffuse, device=self.device).permute(0, 3, 1, 2)
+            results.append(pred_diffuse)
+
+        # Assemble results
+        assembled_result = self.assemble_results(results, positions, img_tensor.shape, 
+                                                 splits_vertical, splits_horizontal, tile_overlap)
         
-        new_dims = (int(original_dims[1]), int(original_dims[0])) # reverse the shape (width, height)
-        pred_diffuse = pred_diffuse.resize(new_dims, Image.Resampling.LANCZOS)
+        # Convert to PIL Image and resize to padded size
+        pred_diffuse = transforms.ToPILImage()(assembled_result.squeeze().cpu())
+        pred_diffuse = pred_diffuse.resize(padded_size, Image.Resampling.LANCZOS)
 
-        if preprocess == 'pad':
-            left, top, right, bottom = padding_info[0], padding_info[1], original_dims[0] - padding_info[2], original_dims[1] - padding_info[3]
-            pred_diffuse = pred_diffuse.crop((left, top, right, bottom))
-        elif preprocess == 'crop':
-            left, top, right, bottom = crop_info
-            pred_diffuse_with_bg = Image.new("RGB", original_size)
-            pred_diffuse_with_bg.paste(pred_diffuse, (int(left), int(top)))
-            pred_diffuse = pred_diffuse_with_bg
-        else:
-            # If no preprocessing, resize the output image to the original size
-            pred_diffuse = pred_diffuse.resize(original_size, Image.Resampling.LANCZOS)
-
+        # Crop to original size
+        left, top, right, bottom = padding_info[0], padding_info[1], padded_size[0] - padding_info[2], padded_size[1] - padding_info[3]
+        pred_diffuse = pred_diffuse.crop((left, top, right, bottom))
+        
         return pred_diffuse
     
-    def generate_reflection_score(self, rgb_image, diffuse_image, kernel_size=15):
-        """
-        Generate a reflection score by comparing grayscale RGB and diffuse images using PyTorch.
-        
-        :param rgb_image: RGB image as a PIL Image
-        :param diffuse_image: Diffuse image as a PIL Image  
-        :param kernel_size: Size of the box kernel for local smoothing
-        :return: reflection score as a PIL Image
-        """
-        
-        # Set device  
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        # Convert RGB and diffuse images to grayscale
-        rgb_gray = rgb_image.convert('L')
-        diffuse_gray = diffuse_image.convert('L')
-        
-        # Load and convert images to PyTorch tensors
-        to_tensor = transforms.ToTensor()
-        rgb_tensor = to_tensor(rgb_gray).to(device)
-        diffuse_tensor = to_tensor(diffuse_gray).to(device)
-        
-        # Ensure both images have the same shape
-        assert rgb_tensor.shape == diffuse_tensor.shape, "Grayscale RGB and diffuse images must have the same dimensions"
-        
-        residuals = torch.abs(rgb_tensor - diffuse_tensor)
-        
-        # Create box kernel
-        box_kernel = torch.ones(1, 1, kernel_size, kernel_size, device=device) / (kernel_size ** 2)
-        
-        # Apply local smoothing
-        smoothed_residuals = F.conv2d(residuals.unsqueeze(0), box_kernel, padding=kernel_size//2).squeeze(0)
-        
-        # Compute patch values
-        patch_size = 16
-        patch_values = F.avg_pool2d(smoothed_residuals.unsqueeze(0), kernel_size=patch_size, stride=1, padding=patch_size//2).squeeze(0)
-        
-        # Use patch values as the reflection score
-        score = patch_values
-        
-        # Normalize the score to [0, 255] range and convert to uint8
-        score = (score - score.min()) / (score.max() - score.min())
-        score = score * 255
-        score = score[0].cpu().numpy().astype(np.uint8)
-        
-        # Convert the score to a PIL Image
-        score_image = Image.fromarray(score)
-        
-        return score_image
-
-    def generate_specular_image(self, rgb_image, diffuse_image):
-        """
-        Generate specular image by subtracting the diffuse image from the RGB image.
-        
-        :param rgb_image: RGB image as a PIL Image 
-        :param diffuse_image: Diffuse image as a PIL Image
-        :return: Specular image as a PIL Image
-        """
-        
-        # Convert images to numpy arrays  
-        rgb_np = np.array(rgb_image)
-        diffuse_np = np.array(diffuse_image)
-        
-        # Subtract diffuse from RGB (clipping to avoid underflow)
-        specular_np = np.clip(rgb_np.astype(int) - diffuse_np.astype(int), 0, 255).astype(np.uint8)
-        
-        # Convert back to PIL Image
-        specular_image = Image.fromarray(specular_np)
-        
-        return specular_image
-    
-    def __repr__(self):
-        return f"Predictor(model={self.model})"
-
 def StableDelight_turbo(local_cache_dir: Optional[str] = None, device="cuda:0", yoso_version='yoso-delight-v0-4-base') -> Predictor:
     """Load the StableDelight_turbo pipeline for a faster inference."""
     
@@ -245,7 +262,6 @@ def _test_run():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--input", "-i", type=str, required=True, help="Input image file")
-    parser.add_argument("--output", "-o", type=str, required=True, help="Output image file")
 
     args = parser.parse_args()
     predictor = StableDelight_turbo(local_cache_dir='./weights', device="cuda:0")
@@ -253,9 +269,7 @@ def _test_run():
     image = Image.open(args.input)
     with torch.inference_mode():
         diffuse_image = predictor(image) 
-    diffuse_image.save(args.output)
-    reflection_score = predictor.generate_reflection_score(image, diffuse_image)
-    reflection_score.save(args.output[:-4]+ '_mask.png')
+    diffuse_image.save(args.input[:-4]+ '_out.png')
 
 if __name__ == "__main__":
     _test_run()
