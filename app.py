@@ -35,7 +35,7 @@ from tqdm import tqdm
 from pathlib import Path
 import gradio
 from gradio.utils import get_cache_folder
-from stable_pix2pix import YosoDelightPipeline
+from stabledelight import YosoDelightPipeline
 
 class Examples(gradio.helpers.Examples):
     def __init__(self, *args, directory_name=None, **kwargs):
