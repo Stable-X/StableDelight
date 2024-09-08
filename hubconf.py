@@ -8,7 +8,7 @@ from PIL import Image, ImageOps
 import torch.nn.functional as F
 
 dependencies = ["torch", "numpy",  "diffusers", "PIL"]
-from stable_pix2pix.pipeline_yoso_delight import YosoDelightPipeline
+from stabledelight.pipeline_yoso_delight import YosoDelightPipeline
 
 def resize_image(image: Image.Image, resolution: int) -> Tuple[Image.Image, Tuple[int, int], Tuple[float, float]]:
     """Resize the image while maintaining aspect ratio and then pad to nearest multiple of 64."""
