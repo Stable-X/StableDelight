@@ -35,7 +35,7 @@ from tqdm import tqdm
 from pathlib import Path
 import gradio
 from gradio.utils import get_cache_folder
-from stabledelight.pipeline_yoso_delight import YosoDelightPipeline
+from stable_pix2pix import YosoDelightPipeline
 
 class Examples(gradio.helpers.Examples):
     def __init__(self, *args, directory_name=None, **kwargs):
@@ -49,10 +49,7 @@ class Examples(gradio.helpers.Examples):
 default_seed = 2024
 default_batch_size = 1
 
-default_image_processing_resolution = 768
-
-default_video_num_inference_steps = 10
-default_video_processing_resolution = 768
+default_image_processing_resolution = 2048
 default_video_out_max_frames = 60
 
 def process_image_check(path_input):
@@ -98,12 +95,10 @@ def process_image(
     path_output_dir = tempfile.mkdtemp()
     path_out_png = os.path.join(path_output_dir, f"{name_base}_delight.png")
     input_image = Image.open(path_input)
-    input_image = resize_image(input_image, default_image_processing_resolution)
-
     pipe_out = pipe(
         input_image,
         match_input_resolution=False,
-        processing_resolution=max(input_image.size)
+        processing_resolution=default_image_processing_resolution
     )
 
     processed_frame = (pipe_out.prediction.clip(-1, 1) + 1) / 2
@@ -111,20 +106,6 @@ def process_image(
     processed_frame = Image.fromarray(processed_frame)
     processed_frame.save(path_out_png)
     yield [input_image, path_out_png]
-
-def center_crop(img):
-    # Open the image file
-    img_width, img_height = img.size
-    crop_width =min(img_width, img_height)
-    # Calculate the cropping box
-    left = (img_width - crop_width) / 2
-    top = (img_height - crop_width) / 2
-    right = (img_width + crop_width) / 2
-    bottom = (img_height + crop_width) / 2
-    
-    # Crop the image
-    img_cropped = img.crop((left, top, right, bottom))
-    return img_cropped
 
 def process_video(
     pipe,
@@ -169,11 +150,11 @@ def process_video(
                 break
 
             frame_pil = Image.fromarray(frame)
-            # frame_pil = center_crop(frame_pil)
             pipe_out = pipe(
                 frame_pil,
                 match_input_resolution=False,
-                latents=init_latents
+                latents=init_latents,
+                processing_resolution=default_image_processing_resolution
             )
 
             if init_latents is None:
