@@ -24,7 +24,7 @@ or directly build package:
 pip install git+https://github.com/Stable-X/StableDelight.git
 ```
 
-## Usage
+## Torch Hub Loader 🚀
 To use the StableDelight pipeline, you can instantiate the model and apply it to an image as follows:
 
 ```python
@@ -43,3 +43,16 @@ delight_image = predictor(input_image)
 # Save or display the result
 delight_image.save("output/delight.png")
 ```
+
+## Gradio interface 🤗
+
+We also provide a Gradio <a href='https://github.com/gradio-app/gradio'><img src='https://img.shields.io/github/stars/gradio-app/gradio'></a> interface for a better experience, just run by:
+
+```bash
+# For Linux and Windows users (and macOS with Intel??)
+python app.py
+```
+
+You can specify the `--server_port`, `--share`, `--server_name` arguments to satisfy your needs!
+
+
